@@ -1,306 +1,182 @@
 # SLIRC WASM Bridge
 
-This crate provides a WebAssembly bridge for the `slirc-proto` library, allowing JavaScript environments (like the `slirc.net` web client) to use the exact same IRC protocol parsing logic as the server and desktop client.
+A WebAssembly bridge for `slirc-proto`, enabling JavaScript environments to use the same IRC protocol parsing logic as the server and desktop client.
 
 ## Purpose
 
-To eliminate parser inconsistencies between the frontend and backend by compiling the Rust protocol implementation to WASM.
+Eliminate parser inconsistencies between frontend and backend by compiling the Rust protocol implementation to WASM. The web client shares validation rules and message structures with the native client and server.
 
-## Research Findings
+## Architecture
 
-### Existing Serde Support
-
-**Good news**: `slirc-proto` already has Serde support behind a feature flag.
-
-The following types already derive `Serialize`/`Deserialize` when `features = ["serde"]`:
-
-| Type       | Location           | Notes                        |
-| ---------- | ------------------ | ---------------------------- |
-| `Message`  | `message/types.rs` | Top-level message struct     |
-| `Command`  | `command/types.rs` | Large enum with ~80 variants |
-| `Prefix`   | `prefix/types.rs`  | Server or Nickname variant   |
-| `Response` | `response/mod.rs`  | Numeric reply codes          |
-| `Tag`      | `message/types.rs` | IRCv3 message tags           |
-
-### JSON Serialization Format
-
-Serde's default enum serialization will produce **externally tagged** JSON:
-
-```json
-// Command::PRIVMSG("#channel", "hello")
-{ "PRIVMSG": ["#channel", "hello"] }
-
-// Prefix::Nickname("nick", "user", "host")
-{ "Nickname": ["nick", "user", "host"] }
-
-// Prefix::ServerName("irc.example.com")
-{ "ServerName": "irc.example.com" }
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Browser                               │
+│  ┌──────────────────┐         ┌──────────────────────────┐  │
+│  │   JavaScript     │  JSON   │     WASM Module          │  │
+│  │  - WebSocket IO  │◄───────►│  - parse(string)         │  │
+│  │  - UI / DOM      │         │  - build(object)         │  │
+│  │  - User Input    │         │  - slirc-proto structs   │  │
+│  └────────┬─────────┘         └──────────────────────────┘  │
+│           │                                                  │
+└───────────┼──────────────────────────────────────────────────┘
+            │ WebSocket
+            ▼
+     ┌──────────────┐
+     │  IRC Server  │
+     └──────────────┘
 ```
 
-This is usable but slightly awkward for JS. We may want to provide helper functions or consider `#[serde(tag = "type")]` in the future.
+### Data Flow
 
-### Reference Implementation
+| Direction | Flow |
+|-----------|------|
+| Incoming  | Server → WebSocket → JS → `parse(raw)` → WASM → JSON object |
+| Outgoing  | User → JS → `build(obj)` → WASM → raw string → WebSocket → Server |
 
-Studied `matrix-org/matrix-rust-sdk` (Apache-2.0 license). Key patterns:
-
-1. **Use `serde-wasm-bindgen`** for struct conversion (not manual field access).
-2. **No tokio in WASM**: Use `wasm_bindgen_futures::spawn_local` if async needed.
-3. **Error conversion**: Return `Result<JsValue, JsValue>` for JS try/catch compatibility.
-
-## API Goals
-
-This crate will expose the following functionality to JavaScript via `wasm-bindgen`:
-
-### Parsing
-
-```rust
-#[wasm_bindgen]
-pub fn parse(input: &str) -> Result<JsValue, JsValue> {
-    let msg: Message = input.parse().map_err(|e| e.to_string())?;
-    Ok(serde_wasm_bindgen::to_value(&msg)?)
-}
-```
-
-### Construction
-
-```rust
-#[wasm_bindgen]
-pub fn build(val: JsValue) -> Result<String, JsValue> {
-    let msg: Message = serde_wasm_bindgen::from_value(val)?;
-    Ok(msg.to_string())
-}
-```
-
-## TypeScript Interface (Expected Output)
+## API
 
 ```typescript
-interface IrcMessage {
-  tags?: Array<{ key: string; value?: string }>;
-  prefix?: { ServerName: string } | { Nickname: [string, string, string] };
-  command: { [commandName: string]: any[] };
-}
+// Core
+export function parse(input: string): IrcMessage;
+export function build(msg: IrcMessage): string;
+export function version(): string;
 
-// Example parsed message
-const msg = parse(":nick!user@host PRIVMSG #channel :Hello!");
-// {
-//   prefix: { Nickname: ["nick", "user", "host"] },
-//   command: { PRIVMSG: ["#channel", "Hello!"] }
-// }
+// Helpers (planned)
+export function privmsg(target: string, text: string): string;
+export function join(channel: string): string;
 ```
 
-## Build Instructions
+## Implementation
 
-```bash
-# Install wasm-pack if not present
-cargo install wasm-pack
-
-# Build for web target
-wasm-pack build --target web --release
-
-# Output in ./pkg/
-```
-
-## Implementation Roadmap
-
-### Phase 1: Project Configuration
-
-- [x] Initialize `slirc-wasm` crate
-- [x] Add to workspace `Cargo.toml`
-- [ ] Update `slirc-wasm/Cargo.toml`:
-  - Enable `serde` feature on `slirc-proto`
-  - Add `console_error_panic_hook` for debugging
-  - Configure `[profile.release]` for WASM size optimization
-- [ ] Create `.cargo/config.toml` for WASM-specific settings (optional)
-
-### Phase 2: Core Bridge Implementation
-
-- [ ] Implement `parse(input: &str) -> Result<JsValue, JsValue>`
-  - Parse raw IRC line to `Message`
-  - Serialize to JS object via `serde_wasm_bindgen::to_value`
-  - Return parse errors as strings
-- [ ] Implement `build(val: JsValue) -> Result<String, JsValue>`
-  - Deserialize JS object to `Message`
-  - Serialize to IRC string via `Message::to_string()`
-  - Return validation errors as strings
-- [ ] Add `version()` function (already present as placeholder)
-
-### Phase 3: Developer Experience
-
-- [ ] Generate TypeScript definitions
-  - Option A: Use `tsify` crate for auto-generation
-  - Option B: Write manual `.d.ts` file
-- [ ] Add helper functions for common commands:
-  - `privmsg(target: &str, text: &str) -> String`
-  - `join(channel: &str) -> String`
-  - `nick(nickname: &str) -> String`
-- [ ] Document JSON structure of each command variant
-
-### Phase 4: Testing
-
-- [ ] Unit tests in Rust (`cargo test`)
-- [ ] WASM tests (`wasm-bindgen-test` in headless browser)
-- [ ] Round-trip tests: `parse(build(x)) == x`
-- [ ] Fuzz testing for parse function (optional)
-
-### Phase 5: CI/CD & Release
-
-- [ ] GitHub Actions workflow:
-  - Run `cargo test`
-  - Run `wasm-pack test --headless --chrome`
-  - Build release artifacts
-- [ ] Publish to npm (optional, can also just copy `pkg/` to `slirc-net`)
-- [ ] Add usage documentation for frontend integration
-
-## Dependencies
+### Phase 1: Configuration
 
 ```toml
+# slirc-wasm/Cargo.toml
+[package]
+name = "slirc-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 wasm-bindgen = "0.2"
+serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
-slirc-proto = { path = "../slirc-proto", default-features = false, features = ["serde"] }
 
-[dev-dependencies]
-wasm-bindgen-test = "0.3"
-```
+[dependencies.slirc-proto]
+path = "../slirc-proto"
+default-features = false
+features = ["serde"]
 
-## Size Optimization
-
-Add to `Cargo.toml`:
-
-```toml
 [profile.release]
-opt-level = "s"      # Optimize for size
-lto = true           # Link-time optimization
-codegen-units = 1    # Single codegen unit for better optimization
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
 ```
 
-Expected bundle size: ~100-300KB (gzipped: ~30-80KB)
+### Phase 2: Core Implementation
 
-## Additional Research Findings
-
-### TypeScript Generation with `tsify`
-
-The `tsify` crate (Apache-2.0/MIT) automatically generates TypeScript definitions from Rust structs. Key features:
-
-- Integrates with `serde-wasm-bindgen` via `features = ["js"]`
-- Derives `IntoWasmAbi`/`FromWasmAbi` so no manual `from_value`/`to_value` calls
-- Supports Serde attributes (`rename`, `tag`, `untagged`, etc.)
-
-Example:
 ```rust
-use tsify::Tsify;
+// src/lib.rs
+use wasm_bindgen::prelude::*;
+use slirc_proto::Message;
 
-#[derive(Tsify, Serialize, Deserialize)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
-pub struct Point { x: i32, y: i32 }
+#[wasm_bindgen(start)]
+pub fn init() {
+    console_error_panic_hook::set_once();
+}
+
+#[wasm_bindgen]
+pub fn parse(input: &str) -> Result<JsValue, JsValue> {
+    let msg: Message = input.parse()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    serde_wasm_bindgen::to_value(&msg)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn build(val: JsValue) -> Result<String, JsValue> {
+    let msg: Message = serde_wasm_bindgen::from_value(val)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(msg.to_string())
+}
+
+#[wasm_bindgen]
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
 ```
 
-Generates:
+### Phase 3: TypeScript Types
+
+Option A: Manual `.d.ts` (simpler, no proto changes):
 ```typescript
-export interface Point { x: number; y: number; }
+// pkg/slirc_wasm.d.ts (manual addition)
+export interface IrcMessage {
+  tags?: Record<string, string>;
+  prefix?: { Server: string } | { Nick: [string, string?, string?] };
+  command: Record<string, any>;
+}
 ```
 
-**Decision**: Use `tsify` for Phase 3 TypeScript generation.
+Option B: `tsify` integration (requires proto changes):
+- Add `wasm` feature to `slirc-proto`
+- Derive `Tsify` on `Message`, `Command`, `Prefix`
 
-### `serde-wasm-bindgen` Configuration Options
+### Phase 4: Frontend Integration
 
-The serializer can be customized:
+```javascript
+import init, { parse, build } from './pkg/slirc_wasm.js';
 
-- `serialize_missing_as_null(true)`: Serialize `None` as `null` instead of `undefined`
-- `serialize_maps_as_objects(true)`: Serialize `HashMap` as plain objects instead of `Map`
-- `Serializer::json_compatible()`: Preset for JSON-like output
+await init();
 
-**Recommendation**: Use `Serializer::json_compatible()` for more intuitive JS objects.
+socket.onmessage = (e) => {
+  const msg = parse(e.data);
+  handleMessage(msg);
+};
 
-### Existing IRC Web Client Architectures
+function send(command) {
+  socket.send(build(command));
+}
+```
 
-Researched how other web IRC clients handle this:
+## Build & Test
 
-| Project | Architecture | Protocol Layer | License |
-|---------|-------------|----------------|---------|
-| **The Lounge** | Node.js server + Vue frontend | JS parser (irc-framework) | MIT |
-| **Kiwi IRC** | Static files + WebSocket proxy | JS parser | Apache-2.0 |
-| **Gamja** | Static files + WebSocket | JS parser | AGPL-3.0 |
+```bash
+# Build
+wasm-pack build --target web --release
 
-**Key insight**: All existing clients use JavaScript parsers. Our WASM approach is novel in the IRC space.
+# Test
+cargo test
+wasm-pack test --headless --firefox
 
-### WebSocket Gateway Options
+# Size check (target: <100KB gzipped)
+ls -lh pkg/*.wasm
+gzip -c pkg/slirc_wasm_bg.wasm | wc -c
+```
 
-If `slircd-ng` native WebSocket support is incomplete, we can use a gateway:
+## Decisions
 
-1. **webircgateway** (kiwiirc): Go-based proxy, well-tested, Apache-2.0
-   - Handles WEBIRC, encoding, multiple transports
-   - Production-ready, used by many networks
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Parsing location | WASM | Single source of truth |
+| Serialization | `serde-wasm-bindgen` | Low overhead, native JS types |
+| TypeScript | Manual `.d.ts` initially | Avoids proto modifications |
+| WebSocket | JS-side | Better browser API integration |
 
-2. **Native WebSocket in slircd-ng**: Already partially implemented
-   - `websocket.rs` in `slirc-proto` has `WebSocketConfig`
-   - `config.toml` has commented `[websocket]` section
+## Files
 
-**Recommendation**: First verify `slircd-ng` native WebSocket works. Fall back to `webircgateway` if needed.
-
-### Browser Compatibility Notes
-
-From `wasm-bindgen` docs:
-
-- All modern browsers support WASM
-- IE11 does NOT support WASM (acceptable loss)
-- Mobile browsers fully supported
-- WebSocket support is universal in modern browsers
-
-### Security Considerations
-
-From `webircgateway` best practices:
-
-1. **Origin validation**: Only allow connections from trusted domains
-2. **HTTPS required**: Browsers block mixed content (WSS from HTTPS pages)
-3. **WEBIRC**: Preserve real user IPs for bans to work correctly
-4. **Rate limiting**: Web clients can be easily scripted for abuse
-
-## Architecture Decision Record
-
-### ADR-001: Use WASM for Protocol Parsing
-
-**Context**: Need IRC protocol parsing in browser for web client.
-
-**Decision**: Compile `slirc-proto` to WASM rather than write a JS parser.
-
-**Rationale**:
-1. Single source of truth for parsing logic
-2. Guarantees consistency between server and client
-3. Leverages existing tested code
-4. Zero maintenance of duplicate parser
-
-**Trade-offs**:
-- Slightly larger bundle size (~100KB vs ~20KB for minimal JS parser)
-- Build complexity (requires `wasm-pack`)
-- Novel approach with less community precedent
-
-**Status**: Accepted
-
-### ADR-002: Use `serde-wasm-bindgen` for Serialization
-
-**Context**: Need to convert Rust structs to JavaScript objects.
-
-**Decision**: Use `serde-wasm-bindgen` instead of manual `wasm-bindgen` getters.
-
-**Rationale**:
-1. Official recommended approach
-2. Much smaller code size than JSON-based alternatives
-3. Native JavaScript types (Map, Array, etc.)
-4. Integrates with `tsify` for TypeScript
-
-**Status**: Accepted
-
-### ADR-003: TypeScript Generation with `tsify`
-
-**Context**: Frontend developers need type definitions.
-
-**Decision**: Use `tsify` crate with `features = ["js"]`.
-
-**Rationale**:
-1. Automatic generation from Rust types
-2. Stays in sync with Rust changes
-3. Supports Serde attributes for customization
-
-**Status**: Proposed (pending implementation)
+```
+slirc-wasm/
+├── Cargo.toml
+├── src/
+│   └── lib.rs
+├── tests/
+│   └── web.rs
+└── README.md
+```
