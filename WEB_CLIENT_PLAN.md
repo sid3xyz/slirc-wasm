@@ -34,8 +34,33 @@ wasm-pack build --target web
 
 ## Implementation Roadmap
 
-- [x] Create crate structure
-- [ ] Implement `parse_message` wrapper around `slirc_proto::Message`
-- [ ] Implement `build_message` wrapper
-- [ ] Add serialization support (Serde) for JS objects
-- [ ] Add unit tests ensuring JS compatibility
+### Phase 1: Project Configuration & Dependencies
+- [x] Initialize `slirc-wasm` crate.
+- [ ] Update `Cargo.toml` to enable `serde` feature in `slirc-proto`.
+- [ ] Configure `wasm-pack` build profile for size optimization.
+- [ ] Set up `console_error_panic_hook` for better debugging in browser.
+
+### Phase 2: Core Protocol Bridge
+- [ ] **Parsing**: Implement `parse_message(input: &str) -> Result<JsValue, JsValue>`.
+    - Should accept a raw IRC line.
+    - Should return a JSON-serializable object (via `serde-wasm-bindgen`).
+    - Should handle parsing errors gracefully and return meaningful error strings.
+- [ ] **Construction**: Implement `build_message(command: &str, params: Vec<String>, tags: Option<JsValue>) -> Result<String, JsValue>`.
+    - Should accept command, parameters, and optional tags.
+    - Should validate inputs using `slirc-proto` validation logic.
+    - Should return the formatted IRC string.
+
+### Phase 3: Data Structure Exposure
+- [ ] Define TypeScript definitions (via `wasm-bindgen` or manual `.d.ts`) for the Message object structure.
+- [ ] Ensure `slirc-proto` types (Message, Prefix, Tags) serialize to intuitive JSON shapes.
+    - *Note*: May need to create wrapper structs in `slirc-wasm` if the default `slirc-proto` serialization is too Rust-centric.
+
+### Phase 4: Testing & Validation
+- [ ] **Unit Tests**: Write Rust unit tests for the bridge functions.
+- [ ] **WASM Tests**: Configure `wasm-bindgen-test` to run tests in a headless browser/Node.js.
+- [ ] **Round-trip Verification**: Ensure `parse(build(cmd, params))` returns the original data.
+
+### Phase 5: CI/CD & Release
+- [ ] Create GitHub Actions workflow to run `cargo test` and `wasm-pack test`.
+- [ ] Add release step to build artifacts (`pkg/` folder) and publish to GitHub Releases or NPM.
+- [ ] Document usage instructions for the frontend team (how to import and use).
