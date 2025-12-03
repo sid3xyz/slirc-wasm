@@ -1,52 +1,41 @@
-# Web Client Implementation Plan
+# SLIRC WASM Bridge
 
-This document outlines the strategy for implementing a functional web client for `slirc.net` using a WASM-based protocol bridge.
+This crate provides a WebAssembly bridge for the `slirc-proto` library, allowing JavaScript environments (like the `slirc.net` web client) to use the exact same IRC protocol parsing logic as the server and desktop client.
 
-## Architecture
+## Purpose
 
-The web client uses a hybrid architecture:
-- **UI**: HTML/CSS/JS (existing "cyberpunk" terminal theme).
-- **Protocol**: Rust compiled to WASM (via `slirc-wasm` crate).
-- **Transport**: WebSocket (`wss://`) connecting to `slircd-ng`.
+To eliminate parser inconsistencies between the frontend and backend by compiling the Rust protocol implementation to WASM.
 
-This approach ensures that the web client uses the exact same protocol parsing logic (`slirc-proto`) as the server and desktop client, guaranteeing consistency and correctness.
+## API Goals
 
-## Components
+This crate will expose the following functionality to JavaScript via `wasm-bindgen`:
 
-### 1. Backend (`slircd-ng`)
-- **Goal**: Expose a WebSocket endpoint for web clients.
-- **Tasks**:
-    - Enable `[websocket]` listener in `config.toml`.
-    - Verify WebSocket framing implementation in `slircd-ng`.
-    - Configure TLS/SSL (likely via reverse proxy or Cloudflare).
+### Parsing
+```rust
+// Input: Raw IRC line from WebSocket
+// Output: Structured JS object
+fn parse_message(input: &str) -> Result<JsValue, JsValue>
+```
 
-### 2. Protocol Bridge (`slirc-wasm`)
-- **Goal**: Expose `slirc-proto` functionality to JavaScript.
-- **Location**: `/home/straylight/slirc-wasm`
-- **Tasks**:
-    - Implement `parse_message(input: &str) -> JsValue`
-    - Implement `build_message(command: &str, params: Vec<&str>) -> String`
-    - Build pipeline using `wasm-pack`.
+### Construction
+```rust
+// Input: Command and parameters
+// Output: Raw IRC line to send over WebSocket
+fn build_message(command: &str, params: Vec<&str>) -> String
+```
 
-### 3. Frontend (`slirc.net/www/client`)
-- **Goal**: Connect the UI to the backend.
-- **Tasks**:
-    - Replace mock data with real WebSocket connection.
-    - Import `slirc-wasm` for message parsing.
-    - Map IRC events (JOIN, PRIVMSG, etc.) to UI state updates.
+## Build Instructions
+
+This project uses `wasm-pack` to generate the WASM binary and JavaScript glue code.
+
+```bash
+wasm-pack build --target web
+```
 
 ## Implementation Roadmap
 
-### Phase 1: Foundation
-- [x] Create `slirc-wasm` crate structure.
-- [ ] Implement basic parsing in `slirc-wasm`.
-- [ ] Verify `slircd-ng` WebSocket support.
-
-### Phase 2: Integration
-- [ ] Build `slirc-wasm` and copy artifacts to `www/client/pkg/`.
-- [ ] Write JS WebSocket wrapper in `www/client/`.
-- [ ] Connect to local `slircd-ng` instance for testing.
-
-### Phase 3: Deployment
-- [ ] Automate `wasm-pack` build in deployment pipeline.
-- [ ] Deploy to `slirc.net`.
+- [x] Create crate structure
+- [ ] Implement `parse_message` wrapper around `slirc_proto::Message`
+- [ ] Implement `build_message` wrapper
+- [ ] Add serialization support (Serde) for JS objects
+- [ ] Add unit tests ensuring JS compatibility
