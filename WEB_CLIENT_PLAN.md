@@ -1,182 +1,199 @@
 # SLIRC WASM Bridge
 
-A WebAssembly bridge for `slirc-proto`, enabling JavaScript environments to use the same IRC protocol parsing logic as the server and desktop client.
+This crate provides a WebAssembly bridge for the `slirc-proto` library, allowing JavaScript environments (like the `slirc.net` web client) to use the exact same IRC protocol parsing logic as the server and desktop client.
 
 ## Purpose
 
-Eliminate parser inconsistencies between frontend and backend by compiling the Rust protocol implementation to WASM. The web client shares validation rules and message structures with the native client and server.
+To eliminate parser inconsistencies between the frontend and backend by compiling the Rust protocol implementation to WASM. This ensures that the web client behaves exactly like the native client and server, sharing the same validation rules and message structures.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Browser                               │
-│  ┌──────────────────┐         ┌──────────────────────────┐  │
-│  │   JavaScript     │  JSON   │     WASM Module          │  │
-│  │  - WebSocket IO  │◄───────►│  - parse(string)         │  │
-│  │  - UI / DOM      │         │  - build(object)         │  │
-│  │  - User Input    │         │  - slirc-proto structs   │  │
-│  └────────┬─────────┘         └──────────────────────────┘  │
-│           │                                                  │
-└───────────┼──────────────────────────────────────────────────┘
-            │ WebSocket
-            ▼
-     ┌──────────────┐
-     │  IRC Server  │
-     └──────────────┘
+The web client uses a **Hybrid Architecture**:
+
+1.  **JavaScript (Main Thread)**: Handles the WebSocket connection, UI rendering, and user input.
+2.  **WASM (Rust)**: Handles protocol parsing, message construction, and validation.
+
+```mermaid
+graph TD
+    JS[JavaScript / Browser] <-->|JSON Objects| WASM[Rust / WASM Bridge]
+    WASM <-->|Internal Structs| Proto[slirc-proto Crate]
+    JS <-->|WebSocket| Server[IRC Server]
 ```
 
 ### Data Flow
+1.  **Incoming**: Server sends raw IRC string -> JS receives via WebSocket -> JS calls `parse(string)` -> WASM returns typed JSON object.
+2.  **Outgoing**: User types command -> JS calls `build(json_object)` -> WASM returns raw IRC string -> JS sends via WebSocket.
 
-| Direction | Flow |
-|-----------|------|
-| Incoming  | Server → WebSocket → JS → `parse(raw)` → WASM → JSON object |
-| Outgoing  | User → JS → `build(obj)` → WASM → raw string → WebSocket → Server |
+## Project Structure
 
-## API
-
-```typescript
-// Core
-export function parse(input: string): IrcMessage;
-export function build(msg: IrcMessage): string;
-export function version(): string;
-
-// Helpers (planned)
-export function privmsg(target: string, text: string): string;
-export function join(channel: string): string;
+```
+slirc-wasm/
+├── Cargo.toml          # Dependencies (wasm-bindgen, serde, tsify)
+├── src/
+│   ├── lib.rs          # Main exports: parse(), build()
+│   └── utils.rs        # Panic hook, helper functions
+├── tests/
+│   └── web.rs          # WASM-specific tests (wasm-bindgen-test)
+└── README.md           # Usage instructions
 ```
 
-## Implementation
+## Research Findings & Decisions
 
-### Phase 1: Configuration
+### Serialization Strategy
+We use **`serde-wasm-bindgen`** for efficient data transfer between Rust and JS.
+-   **Pros**: Low overhead, direct mapping to JS values (no JSON stringify/parse step), supports `Map`/`Set`.
+-   **Config**: We will use `Serializer::json_compatible()` to ensure the output is idiomatic JSON-like objects for easier consumption in JS.
+
+### TypeScript Integration
+We use **`tsify`** to automatically generate TypeScript definitions.
+-   **Benefit**: The frontend gets full type safety for complex IRC messages without manually maintaining `.d.ts` files.
+-   **Mechanism**: `tsify` derives `IntoWasmAbi` and `FromWasmAbi`, handling the glue code automatically.
+
+### Existing Serde Support
+`slirc-proto` already supports Serde via the `serde` feature flag.
+-   **Supported Types**: `Message`, `Command`, `Prefix`, `Response`, `Tag`.
+-   **Format**: Default enum serialization is externally tagged (e.g., `{ "PRIVMSG": [...] }`). This is acceptable and type-safe.
+
+## API Reference
+
+This crate exposes the following functionality to JavaScript:
+
+### Core Functions
+
+```typescript
+// Parse a raw IRC line into a structured Message object
+export function parse(input: string): IrcMessage;
+
+// Build a raw IRC line from a structured Message object
+export function build(msg: IrcMessage): string;
+
+// Get the version of the underlying protocol library
+export function version(): string;
+```
+
+### Helper Functions (Planned)
+Convenience wrappers for common operations:
+```typescript
+export function make_privmsg(target: string, text: string): string;
+export function make_join(channel: string): string;
+```
+
+## Implementation Roadmap
+
+### Phase 1: Project Configuration
+- [x] Initialize `slirc-wasm` crate
+- [x] Add to workspace `Cargo.toml`
+- [ ] Update `slirc-wasm/Cargo.toml`:
+    -   Add `wasm-bindgen`, `serde-wasm-bindgen`, `console_error_panic_hook`.
+    -   Add `tsify` with `js` feature.
+    -   Enable `serde` feature on `slirc-proto`.
+    -   **Critical**: Set `default-features = false` for `slirc-proto` to avoid pulling in `tokio`.
+- [ ] Configure `[profile.release]` for size optimization (LTO, `opt-level = "s"`).
+
+### Phase 2: Core Bridge Implementation
+- [ ] Implement `parse(input: &str) -> Result<JsValue, JsValue>`
+    -   Use `serde_wasm_bindgen::to_value`.
+- [ ] Implement `build(val: JsValue) -> Result<String, JsValue>`
+    -   Use `serde_wasm_bindgen::from_value`.
+- [ ] Verify error handling (Rust errors should propagate as JS exceptions).
+
+### Phase 3: TypeScript Generation
+- [ ] Add `wasm` feature to `slirc-proto/Cargo.toml`.
+- [ ] Add `tsify` dependency to `slirc-proto` (optional, guarded by `wasm` feature).
+- [ ] Annotate `Message`, `Command`, etc. with `#[derive(Tsify)]` guarded by `#[cfg(feature = "wasm")]`.
+- [ ] Export generated types in `slirc-wasm`.
+
+### Phase 4: Frontend Integration
+- [ ] Create a simple test page in `www/test.html`.
+- [ ] Load the WASM module.
+- [ ] Connect to a WebSocket echo server to test round-trip parsing.
+
+## Testing & Verification
+
+```bash
+# Run standard unit tests
+cargo test
+
+# Run WASM tests (requires headless browser)
+wasm-pack test --headless --firefox
+```
+
+## Frontend Integration Guide
+
+To use this in `slirc.net`:
+
+1.  **Build the WASM**:
+    ```bash
+    wasm-pack build --target web --release
+    ```
+
+2.  **Import in JavaScript**:
+    ```javascript
+    import init, { parse, build } from './pkg/slirc_wasm.js';
+
+    async function run() {
+        await init(); // Initialize WASM module
+
+        // Parse incoming
+        const msg = parse(":nick!user@host PRIVMSG #channel :Hello!");
+        console.log("Command:", msg.command); 
+
+        // Build outgoing
+        const raw = build({
+            command: { PRIVMSG: ["#channel", "Hello back!"] }
+        });
+        socket.send(raw);
+    }
+    run();
+    ```
+
+## Dependencies
 
 ```toml
-# slirc-wasm/Cargo.toml
-[package]
-name = "slirc-wasm"
-version = "0.1.0"
-edition = "2021"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
-
 [dependencies]
 wasm-bindgen = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
+tsify = { version = "0.4", features = ["js"] }
 
 [dependencies.slirc-proto]
 path = "../slirc-proto"
 default-features = false
-features = ["serde"]
-
-[profile.release]
-opt-level = "s"
-lto = true
-codegen-units = 1
-strip = true
-panic = "abort"
+features = ["serde"] 
+# Note: "wasm" feature to be added to slirc-proto for tsify support
 ```
 
-### Phase 2: Core Implementation
+## Size Optimization Strategy
 
-```rust
-// src/lib.rs
-use wasm_bindgen::prelude::*;
-use slirc_proto::Message;
+We aim for a bundle size under 300KB (raw) / 80KB (gzipped).
 
-#[wasm_bindgen(start)]
-pub fn init() {
-    console_error_panic_hook::set_once();
-}
+1.  **Compiler Options**:
+    ```toml
+    [profile.release]
+    opt-level = "s"
+    lto = true
+    codegen-units = 1
+    strip = true
+    panic = "abort"
+    ```
+2.  **Feature Pruning**: Ensure `slirc-proto` does not bring in `tokio`, `bytes`, or other heavy runtime deps.
 
-#[wasm_bindgen]
-pub fn parse(input: &str) -> Result<JsValue, JsValue> {
-    let msg: Message = input.parse()
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    serde_wasm_bindgen::to_value(&msg)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
-}
+## Architecture Decision Records (ADR)
 
-#[wasm_bindgen]
-pub fn build(val: JsValue) -> Result<String, JsValue> {
-    let msg: Message = serde_wasm_bindgen::from_value(val)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    Ok(msg.to_string())
-}
+### ADR-001: Use WASM for Protocol Parsing
+**Status**: Accepted
+**Rationale**: Single source of truth. Eliminates "client parses differently than server" bugs.
 
-#[wasm_bindgen]
-pub fn version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
-}
-```
+### ADR-002: Use `serde-wasm-bindgen`
+**Status**: Accepted
+**Rationale**: Low overhead, idiomatic JS objects.
 
-### Phase 3: TypeScript Types
+### ADR-003: Use `tsify` for Types
+**Status**: Accepted
+**Rationale**: Automated type safety.
+**Constraint**: Requires adding `tsify` support to `slirc-proto` structs eventually. For Phase 1, we may skip strict TS generation if modifying `slirc-proto` is too disruptive, but it remains the goal.
 
-Option A: Manual `.d.ts` (simpler, no proto changes):
-```typescript
-// pkg/slirc_wasm.d.ts (manual addition)
-export interface IrcMessage {
-  tags?: Record<string, string>;
-  prefix?: { Server: string } | { Nick: [string, string?, string?] };
-  command: Record<string, any>;
-}
-```
-
-Option B: `tsify` integration (requires proto changes):
-- Add `wasm` feature to `slirc-proto`
-- Derive `Tsify` on `Message`, `Command`, `Prefix`
-
-### Phase 4: Frontend Integration
-
-```javascript
-import init, { parse, build } from './pkg/slirc_wasm.js';
-
-await init();
-
-socket.onmessage = (e) => {
-  const msg = parse(e.data);
-  handleMessage(msg);
-};
-
-function send(command) {
-  socket.send(build(command));
-}
-```
-
-## Build & Test
-
-```bash
-# Build
-wasm-pack build --target web --release
-
-# Test
-cargo test
-wasm-pack test --headless --firefox
-
-# Size check (target: <100KB gzipped)
-ls -lh pkg/*.wasm
-gzip -c pkg/slirc_wasm_bg.wasm | wc -c
-```
-
-## Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Parsing location | WASM | Single source of truth |
-| Serialization | `serde-wasm-bindgen` | Low overhead, native JS types |
-| TypeScript | Manual `.d.ts` initially | Avoids proto modifications |
-| WebSocket | JS-side | Better browser API integration |
-
-## Files
-
-```
-slirc-wasm/
-├── Cargo.toml
-├── src/
-│   └── lib.rs
-├── tests/
-│   └── web.rs
-└── README.md
-```
+### ADR-004: Hybrid Architecture
+**Status**: Accepted
+**Rationale**: Rust is great for parsing (CPU bound, logic heavy), JS is great for IO (WebSockets, DOM). We play to each language's strength.
