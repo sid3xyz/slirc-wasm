@@ -14,13 +14,13 @@ To eliminate parser inconsistencies between the frontend and backend by compilin
 
 The following types already derive `Serialize`/`Deserialize` when `features = ["serde"]`:
 
-| Type | Location | Notes |
-|------|----------|-------|
-| `Message` | `message/types.rs` | Top-level message struct |
-| `Command` | `command/types.rs` | Large enum with ~80 variants |
-| `Prefix` | `prefix/types.rs` | Server or Nickname variant |
-| `Response` | `response/mod.rs` | Numeric reply codes |
-| `Tag` | `message/types.rs` | IRCv3 message tags |
+| Type       | Location           | Notes                        |
+| ---------- | ------------------ | ---------------------------- |
+| `Message`  | `message/types.rs` | Top-level message struct     |
+| `Command`  | `command/types.rs` | Large enum with ~80 variants |
+| `Prefix`   | `prefix/types.rs`  | Server or Nickname variant   |
+| `Response` | `response/mod.rs`  | Numeric reply codes          |
+| `Tag`      | `message/types.rs` | IRCv3 message tags           |
 
 ### JSON Serialization Format
 
@@ -176,3 +176,131 @@ codegen-units = 1    # Single codegen unit for better optimization
 ```
 
 Expected bundle size: ~100-300KB (gzipped: ~30-80KB)
+
+## Additional Research Findings
+
+### TypeScript Generation with `tsify`
+
+The `tsify` crate (Apache-2.0/MIT) automatically generates TypeScript definitions from Rust structs. Key features:
+
+- Integrates with `serde-wasm-bindgen` via `features = ["js"]`
+- Derives `IntoWasmAbi`/`FromWasmAbi` so no manual `from_value`/`to_value` calls
+- Supports Serde attributes (`rename`, `tag`, `untagged`, etc.)
+
+Example:
+```rust
+use tsify::Tsify;
+
+#[derive(Tsify, Serialize, Deserialize)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct Point { x: i32, y: i32 }
+```
+
+Generates:
+```typescript
+export interface Point { x: number; y: number; }
+```
+
+**Decision**: Use `tsify` for Phase 3 TypeScript generation.
+
+### `serde-wasm-bindgen` Configuration Options
+
+The serializer can be customized:
+
+- `serialize_missing_as_null(true)`: Serialize `None` as `null` instead of `undefined`
+- `serialize_maps_as_objects(true)`: Serialize `HashMap` as plain objects instead of `Map`
+- `Serializer::json_compatible()`: Preset for JSON-like output
+
+**Recommendation**: Use `Serializer::json_compatible()` for more intuitive JS objects.
+
+### Existing IRC Web Client Architectures
+
+Researched how other web IRC clients handle this:
+
+| Project | Architecture | Protocol Layer | License |
+|---------|-------------|----------------|---------|
+| **The Lounge** | Node.js server + Vue frontend | JS parser (irc-framework) | MIT |
+| **Kiwi IRC** | Static files + WebSocket proxy | JS parser | Apache-2.0 |
+| **Gamja** | Static files + WebSocket | JS parser | AGPL-3.0 |
+
+**Key insight**: All existing clients use JavaScript parsers. Our WASM approach is novel in the IRC space.
+
+### WebSocket Gateway Options
+
+If `slircd-ng` native WebSocket support is incomplete, we can use a gateway:
+
+1. **webircgateway** (kiwiirc): Go-based proxy, well-tested, Apache-2.0
+   - Handles WEBIRC, encoding, multiple transports
+   - Production-ready, used by many networks
+
+2. **Native WebSocket in slircd-ng**: Already partially implemented
+   - `websocket.rs` in `slirc-proto` has `WebSocketConfig`
+   - `config.toml` has commented `[websocket]` section
+
+**Recommendation**: First verify `slircd-ng` native WebSocket works. Fall back to `webircgateway` if needed.
+
+### Browser Compatibility Notes
+
+From `wasm-bindgen` docs:
+
+- All modern browsers support WASM
+- IE11 does NOT support WASM (acceptable loss)
+- Mobile browsers fully supported
+- WebSocket support is universal in modern browsers
+
+### Security Considerations
+
+From `webircgateway` best practices:
+
+1. **Origin validation**: Only allow connections from trusted domains
+2. **HTTPS required**: Browsers block mixed content (WSS from HTTPS pages)
+3. **WEBIRC**: Preserve real user IPs for bans to work correctly
+4. **Rate limiting**: Web clients can be easily scripted for abuse
+
+## Architecture Decision Record
+
+### ADR-001: Use WASM for Protocol Parsing
+
+**Context**: Need IRC protocol parsing in browser for web client.
+
+**Decision**: Compile `slirc-proto` to WASM rather than write a JS parser.
+
+**Rationale**:
+1. Single source of truth for parsing logic
+2. Guarantees consistency between server and client
+3. Leverages existing tested code
+4. Zero maintenance of duplicate parser
+
+**Trade-offs**:
+- Slightly larger bundle size (~100KB vs ~20KB for minimal JS parser)
+- Build complexity (requires `wasm-pack`)
+- Novel approach with less community precedent
+
+**Status**: Accepted
+
+### ADR-002: Use `serde-wasm-bindgen` for Serialization
+
+**Context**: Need to convert Rust structs to JavaScript objects.
+
+**Decision**: Use `serde-wasm-bindgen` instead of manual `wasm-bindgen` getters.
+
+**Rationale**:
+1. Official recommended approach
+2. Much smaller code size than JSON-based alternatives
+3. Native JavaScript types (Map, Array, etc.)
+4. Integrates with `tsify` for TypeScript
+
+**Status**: Accepted
+
+### ADR-003: TypeScript Generation with `tsify`
+
+**Context**: Frontend developers need type definitions.
+
+**Decision**: Use `tsify` crate with `features = ["js"]`.
+
+**Rationale**:
+1. Automatic generation from Rust types
+2. Stays in sync with Rust changes
+3. Supports Serde attributes for customization
+
+**Status**: Proposed (pending implementation)
